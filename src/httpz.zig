@@ -563,7 +563,6 @@ pub fn Server(comptime H: type) type {
                 };
             }
 
-            if (conn.handover == .unknown) {
                 // close is the default
                 conn.handover = if (req.canKeepAlive() and conn.request_count < self._max_request_per_connection) .keepalive else .close;
             }

@@ -9,9 +9,14 @@ pub const Opts = struct {
     buffer_size: usize,
 };
 
+// INFO: Beware of the confusing terminologies
+// 1 Thread Pool - N Worker - N std.Thread: One pool having N workers. Which each workers batched jobs multiplexed on the std.Thread
+// 1 Worker - 1 std.Thread : Run the worker batched jobs on the OS std.Thread
+// 1 Worker - n batched jobs
 pub fn ThreadPool(comptime F: anytype) type {
     const BATCH_SIZE = 16;
 
+    // INFO: How thread_buf is injected
     // When the worker thread calls F, it'll inject its static buffer.
     // So F would be: handle(server: *Server, conn: *Conn, buf: []u8)
     // and FullArgs would be our 3 args....
@@ -48,6 +53,8 @@ pub fn ThreadPool(comptime F: anytype) type {
                 threads[i].join();
             };
 
+            // INFO: Notice how worker i-th have worker 2*i-th as peer ???
+            // Try to understand why we need this instead of 1-1 mapping to underlying threads
             for (0..workers.len) |i| {
                 workers[i] = try Worker(F).init(aa, &workers[@mod(i + i, workers.len)], opts);
             }
@@ -121,6 +128,13 @@ pub fn ThreadPool(comptime F: anytype) type {
     };
 }
 
+// INFO: The fucker writing this shit somehow use reversed terminology in CS
+// i.e: This fucker somehow enqueue at the HEAD and dequeue at the TAIL
+// --> Pretty confused son of a bitch
+// INFO: A worker is the worker thread (Not OS Thread as defined in std.Thread)
+// - Contains info to be spawned and run by real std.Thread
+// - 1 worker take cares of a batched and queued N jobs
+// Taking care of function F.
 fn Worker(comptime F: anytype) type {
     // When the worker thread calls F, it'll inject its static buffer.
     // So F would be: handle(server: *Server, conn: *Conn, buf: []u8)
@@ -186,6 +200,7 @@ fn Worker(comptime F: anytype) type {
             return self.head == self.tail;
         }
 
+        // INFO: Enqueue works into queue --> Only update the head
         pub fn spawn(self: *Self, args: []const Args) void {
             var pending = args;
             var capacity: usize = 0;
@@ -197,6 +212,8 @@ fn Worker(comptime F: anytype) type {
                 self.mutex.lock();
                 var head = self.head;
                 var tail = self.tail;
+                // INFO: Wait for the queue to have capacity to be able to enqueue new works
+                // i.e: The loops only exist when cap > 0 --> have slots to enqueue
                 while (true) {
                     capacity = if (head < tail) tail - head - 1 else queue_end - head + tail;
                     if (capacity > 0) {
@@ -207,11 +224,28 @@ fn Worker(comptime F: anytype) type {
                     tail = self.tail;
                 }
 
+                // INFO: Ready := min(amount of slots available, amount of jobs to enqueue)
                 const ready = if (capacity >= pending.len) pending else pending[0..capacity];
+                // Push all the ready jobs to queue
+                // if ready == pending.length
+                // Vor: |E| |E| |E| |E| |E|
+                //       H
+
+                // Nach: |R| |R| |R| |R| |R|
+                //       H
+
+                // if ready < pending.length
+                // Vor: |E| |E| |E| |E| |E|
+                //       H
+
+                // Nach: |R| |R| |R| |E| |E|
+                //                H
+
                 for (ready) |a| {
                     queue[head] = a;
                     head = if (head == queue_end) 0 else head + 1;
                 }
+                // Update new head.
                 self.head = head;
                 self.mutex.unlock();
                 self.read_cond.signal();
@@ -234,9 +268,11 @@ fn Worker(comptime F: anytype) type {
             while (true) {
                 const args = self.getNext(true) orelse return;
 
+                // INFO: The INJECTCION
                 // convert Args to FullArgs, i.e. inject buffer as the last argument
                 var full_args: FullArgs = undefined;
                 const ARG_COUNT = std.meta.fields(FullArgs).len - 1;
+                // INFO: thread_buf as last arg
                 full_args[ARG_COUNT] = buffer;
                 inline for (0..ARG_COUNT) |i| {
                     full_args[i] = args[i];
@@ -245,6 +281,7 @@ fn Worker(comptime F: anytype) type {
             }
         }
 
+        // INFO: Run the jobs enqueued --> Only update the tail
         fn getNext(self: *Self, block: bool) ?Args {
             const queue = self.queue;
             const queue_end = queue.len - 1;
@@ -278,6 +315,8 @@ fn Worker(comptime F: anytype) type {
     };
 }
 
+// INFO: HIHI Learn how thread_buf is injected here
+// INFO: The FullArgs is the thread_buf already-injected list
 fn SpawnArgs(FullArgs: anytype) type {
     const full_fields = std.meta.fields(FullArgs);
     const ARG_COUNT = full_fields.len - 1;
@@ -309,6 +348,8 @@ const t = @import("t.zig");
 test "ThreadPool: batch add" {
     defer t.reset();
 
+    // INFO: Counts is numebr of worker - thread
+    // Backlogs: is the size of the queue buffer
     const counts = [_]u32{ 1, 2, 3, 4, 5, 6 };
     const backlogs = [_]u32{ 1, 2, 3, 4, 5, 6 };
     for (counts) |count| {
@@ -321,6 +362,13 @@ test "ThreadPool: batch add" {
             testC4 = 0;
             testC5 = 0;
             testC6 = 0;
+            // INFO: Reads: Bro, allocate me a threadpool
+            // with count workers and
+            // backlog amount of jobs and
+            // each thread will be run with an extra thread-private buffer of 512 bytes.
+            //      The function F to run is testIncr for each thread
+            //      Args = .{1} --> Full Args = .{1, [512]u8} --> F(1, 512-byte buffer) will be called
+            //
             var tp = try ThreadPool(testIncr).init(t.arena.allocator(), .{ .count = count, .backlog = backlog, .buffer_size = 512 });
             defer tp.deinit();
 
@@ -334,6 +382,7 @@ test "ThreadPool: batch add" {
                 std.time.sleep(std.time.ns_per_ms);
             }
             tp.stop();
+            // INFO: Sum = 1000 * 1 + 1000 * 2 + 1000 * 3 + 1000 * 4 = 10000
             try t.expectEqual(10_000, testSum);
             try t.expectEqual(4_000, testCount);
 
@@ -426,7 +475,10 @@ var testC5: u64 = 0;
 var testC6: u64 = 0;
 fn testIncr(c: u64, buf: []u8) void {
     std.debug.assert(buf.len == 512);
+    // Increase global sum by c
     _ = @atomicRmw(u64, &testSum, .Add, c, .monotonic);
+
+    // Increase global count by 1
     _ = @atomicRmw(u64, &testCount, .Add, 1, .monotonic);
     switch (c) {
         1 => _ = @atomicRmw(u64, &testC1, .Add, 1, .monotonic),
