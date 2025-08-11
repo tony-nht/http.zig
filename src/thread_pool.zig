@@ -362,9 +362,9 @@ test "ThreadPool: batch add" {
             testC4 = 0;
             testC5 = 0;
             testC6 = 0;
-            // INFO: Reads: Bro, allocate me a threadpool
-            // with count workers and
-            // backlog amount of jobs and
+            // INFO: Reads: Bro, allocate me a threadpool with:
+            // count workers
+            // backlog amount of jobs
             // each thread will be run with an extra thread-private buffer of 512 bytes.
             //      The function F to run is testIncr for each thread
             //      Args = .{1} --> Full Args = .{1, [512]u8} --> F(1, 512-byte buffer) will be called
